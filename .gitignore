@@ -1,0 +1,10 @@
+# OS / editor
+.DS_Store
+.obsidian/
+.vscode/
+
+# never commit real telemetry, dumps, or unsanitized configs
+*.log
+*.evtx
+*.pcap
+**/local-unsanitized/
