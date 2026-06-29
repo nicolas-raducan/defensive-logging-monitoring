@@ -64,7 +64,7 @@ the search head for all detections.
 
 ## Verification
 
-- Web UI loads at `http://<INDEXER_IP>:8000` with no startup errors.
+- Web UI loads at `http://10.0.0.100:8000` with no startup errors.
 - Receiving port is listening:
   ```bash
   splunk display listen

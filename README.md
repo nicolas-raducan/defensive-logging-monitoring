@@ -14,16 +14,11 @@ role: **operating a SIEM against real endpoint data** — onboarding logs,
 writing SPL, and turning raw telemetry into threshold-based alerts that fire on
 attacker behaviour rather than on signatures.
 
-> **Project status (June 2026):** Phase 1 (Splunk indexer) is complete. Phase 2
-> (endpoint telemetry pipeline) is in progress. Phases 3–4 (detection authoring
-> and ATT&CK write-up) are planned. Each section below is marked with its
-> current state.
-
 ## Table of Contents
 1. [Project Overview](#project-overview)
 2. [Architecture](#architecture)
-3. [Detection Model](#detection-model)
-4. [Technologies & Core Concepts](#technologies--core-concepts)
+3. [Technologies & Core Concepts](#technologies--core-concepts)
+4. [Detection Model](#detection-model)
 5. [Repository Structure](#repository-structure)
 6. [System Requirements](#system-requirements)
 7. [Installation & Setup Guide](#installation--setup-guide)
@@ -47,7 +42,7 @@ VM generates the activity the detections are designed to catch.
 
 ```mermaid
 graph LR
-    Parrot[Parrot OS Attacker<br/>Hydra brute-force] -->|RDP / SMB| Win10
+    Parrot[Parrot OS Attacker<br/>NetExec (nxc) spray] -->|SMB local-auth| Win10
 
     subgraph Domain [AllSafeCorp Domain - KVM/QEMU]
         Win10[Win10 Endpoint<br/>Sysmon + Universal Forwarder]
@@ -65,16 +60,6 @@ graph LR
     class Splunk siem;
 ```
 
-## Detection Model
-
-Each detection turns a raw telemetry source into a behavioural alert and maps it
-to the technique it catches.
-
-| Detection | Telemetry source | Detection logic | MITRE ATT&CK | Status |
-|---|---|---|---|---|
-| **Brute-force login** | Windows Security (4625 / 4624) | At least 10 failed logons from one source/user within 5 min; flag a 4624 success *after* the failures (spray-then-succeed) | T1110, T1110.001, T1110.003 | Planned (Phase 3) |
-| **LSASS credential access** | Sysmon (Event ID 10) | Process access handle opened against `lsass.exe` | T1003.001 | Stretch |
-| **PsExec lateral movement** | Sysmon (Event ID 1 + 3) | Service-style process creation paired with SMB (445) network connection | T1021.002 | Stretch |
 
 ## Technologies & Core Concepts
 
@@ -84,17 +69,30 @@ to the technique it catches.
 * **Threat Mapping:** MITRE ATT&CK (Credential Access, Lateral Movement).
 * **Virtualization:** KVM/QEMU, `libvirt`, `virt-manager` (shared with the AD lab environment).
 
+## Detection Model
+
+Each detection turns a raw telemetry source into a behavioural alert and maps it
+to the technique it catches.
+
+| Detection | Telemetry source | Detection logic | MITRE ATT&CK | Status |
+|---|---|---|---|---|
+| **Brute-force / password spray** | Windows Security (4625) | ≥10 failed network logons (`Logon_Type=3`) from one source within a 5-min window; `users_targeted` (distinct accounts hit) flags spraying | T1110 · .003 detected · .001 contained by lockout | **Detected** |
+| **Spray-then-succeed** | Windows Security (4625 + 4624) | A 4625 burst followed by a 4624 success from the same source — the attempt landed | T1110 + T1078 | Future work |
+| **LSASS credential access** | Sysmon (Event ID 10) | Process access handle opened against `lsass.exe` | T1003.001 | Stretch |
+| **PsExec lateral movement** | Sysmon (Event ID 1 + 3) | Service-style process creation paired with SMB (445) network connection | T1021.002 | Stretch |
+
 ## Repository Structure
 
 * `docs/`: Per-phase build notes and the full command/troubleshooting reference.
     * `01-splunk-setup.md`: Phase 1 — Splunk indexer install, hardening, gotchas.
-    * `02-endpoint-pipeline.md`: Phase 2 — Sysmon + forwarder onboarding *(in progress)*.
+    * `02-endpoint-pipeline.md`: Phase 2 — Sysmon + forwarder onboarding.
 * `configs/`: Sanitized `inputs.conf` / `outputs.conf` from the forwarder.
 * `detections/`: Saved SPL queries / alert definitions.
 * `screenshots/`: Visual proof of the pipeline and triggered alerts.
 
-> All configs are **sanitized** — IPs, hostnames, and credentials are replaced
-> with placeholders such as `<INDEXER_IP>`.
+> Configs and docs contain no real secrets — no credentials, tokens, or real
+> public/corporate IPs. The lab's RFC1918 addressing and fictional identity are
+> shown as-is, consistent with the linked AD lab repo.
 
 ## System Requirements
 
@@ -109,7 +107,7 @@ to the technique it catches.
 
 ## Installation & Setup Guide
 
-### Phase 1 — Splunk Indexer (complete)
+### Phase 1 — Splunk Indexer
 
 On the Ubuntu Server VM (full commands and troubleshooting in
 [`docs/01-splunk-setup.md`](docs/01-splunk-setup.md)):
@@ -129,7 +127,7 @@ sudo /opt/splunk/bin/splunk enable boot-start -user splunk-svc
 sudo ufw allow 9997/tcp
 ```
 
-### Phase 2 — Endpoint Telemetry Pipeline (in progress)
+### Phase 2 — Endpoint Telemetry Pipeline
 
 On the Windows 10 endpoint:
 
@@ -138,7 +136,7 @@ On the Windows 10 endpoint:
 .\sysmon64.exe -accepteula -i sysmonconfig-export.xml
 
 # 2. install the Universal Forwarder, point it at the indexer
-.\splunk.exe add forward-server <INDEXER_IP>:9997
+.\splunk.exe add forward-server 10.0.0.100:9997
 ```
 
 Then collect both logs via `inputs.conf` and ship them via `outputs.conf`
@@ -146,13 +144,15 @@ Then collect both logs via `inputs.conf` and ship them via `outputs.conf`
 
 ```ini
 [WinEventLog://Security]
+start_from = oldest
+current_only = false
 index = endpoint
-disabled = 0
 
 [WinEventLog://Microsoft-Windows-Sysmon/Operational]
-index = endpoint
-disabled = 0
+start_from = oldest
+current_only = false
 renderXml = true
+index = endpoint
 ```
 
 **Acceptance check** — in Splunk, both sourcetypes appear:
@@ -161,14 +161,19 @@ renderXml = true
 index=endpoint | stats count by sourcetype
 ```
 
-### Phase 3 — Brute-Force Detection (planned)
+### Phase 3 — Brute-Force Detection
 
-Run Hydra from Parrot OS against the endpoint's SMB/RDP to generate failed logons,
-then author and schedule the SPL alert from the [Detection Model](#detection-model).
+From Parrot OS, **NetExec (`nxc`)** sprays throwaway **local** accounts over SMB
+(`--local-auth`, so the `4625`s log on the Win10 endpoint where the forwarder ships
+them — a domain logon would log on the DC, which has no forwarder). The scheduled
+SPL alert from the [Detection Model](#detection-model) then fires on the volume.
+Full write-up: [`docs/03-brute-force-detection.md`](docs/03-brute-force-detection.md).
 
-### Phase 4 — ATT&CK Mapping & Write-up (planned)
+### Phase 4 — ATT&CK Mapping & Write-up
 
-Map the firing detection to MITRE ATT&CK and complete this documentation.
+The firing detection is mapped to MITRE ATT&CK (T1110 / .001 / .003), with the
+validation evidence and limitations in
+[`docs/03-brute-force-detection.md`](docs/03-brute-force-detection.md).
 
 ## Key Implementation Features
 
@@ -193,12 +198,20 @@ search results being exfiltrated to arbitrary recipients.
 
 ## Validation & Test Scenarios
 
-*Phase 1 (current):* Splunk web UI loads with no startup errors and the receiving
-port is listening (`splunk display listen`); the `endpoint` index exists.
+*Phase 1:* Splunk web UI loads with no startup errors and the receiving port is
+listening (`splunk display listen`); the `endpoint` index exists.
 
-*Phases 2–3 (pending):* screenshots of both sourcetypes arriving in
-`index=endpoint`, and of the brute-force alert appearing under
-*Activity → Triggered Alerts*, will be added here as those phases complete.
+*Phase 2:* both sourcetypes arrive in `index=endpoint`
+([`screenshots/01_both-sourcetypes.png`](screenshots/01_both-sourcetypes.png)) —
+`WinEventLog:Security` and the Sysmon channel.
+
+*Phase 3:* the spray is generated
+([`02_nxc-attack.png`](screenshots/02_nxc-attack.png)), the failures arrive via the
+forwarder ([`03_host-endpoint.png`](screenshots/03_host-endpoint.png)), the detection
+row fires — count 31, `users_targeted` 7
+([`04_detection-row.png`](screenshots/04_detection-row.png)) — and the alert appears
+under *Activity → Triggered Alerts*
+([`05_fired-alert.png`](screenshots/05_fired-alert.png)).
 
 ## Engineering Lessons
 
@@ -215,3 +228,23 @@ port is listening (`splunk display listen`); the `endpoint` index exists.
   Splunk as root is deprecated — ownership had to be handed to a dedicated
   service user, and `/opt/splunk/bin` added to `PATH` (`SPLUNK_HOME` does not do
   this).
+* **Account lockout reshaped the detection — key on source IP, not username.**
+  Single-account brute force self-defeats: the lockout policy caps any account at
+  ~6 failures (below the 10 threshold), so grouping by username never fires.
+  Re-keying the rule on `Source_Network_Address` and aggregating across accounts —
+  with `dc(Account_Name)` as the spray tell — is what actually catches the attack.
+  The defensive control directly shaped the detection logic (T1110.001 guessing vs
+  .003 spraying).
+* **Time integrity is foundational for a SIEM — "consistent but wrong" is the
+  trap.** Events were present over *All time* yet invisible to recent search
+  windows, so the scheduled alert never fired despite live attacks. Cause:
+  clock/timezone skew across hosts — the DC and endpoint *agreed with each other*
+  on a wrong time, so internal consistency masked the error. Verify clocks against
+  an external truth, never internal agreement; skew silently breaks every
+  time-window rule and cross-host correlation.
+* **Know the attack you detect — local vs domain auth decides where the `4625`
+  lands.** Hydra's SMB module couldn't negotiate SMBv2/3 (switched to NetExec), and
+  `nxc` defaulted to *domain* auth — landing the `4625` on the DC (no forwarder →
+  invisible). `--local-auth` forces authentication against the endpoint's local
+  SAM, so the event is logged where the forwarder ships it. Understanding the
+  tooling was a prerequisite to collecting the telemetry.
