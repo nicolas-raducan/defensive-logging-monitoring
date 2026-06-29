@@ -42,7 +42,7 @@ VM generates the activity the detections are designed to catch.
 
 ```mermaid
 graph LR
-    Parrot[Parrot OS Attacker<br/>NetExec (nxc) spray] -->|SMB local-auth| Win10
+    Parrot["Parrot OS Attacker<br/>NetExec (nxc) spray"] -->|SMB local-auth| Win10
 
     subgraph Domain [AllSafeCorp Domain - KVM/QEMU]
         Win10[Win10 Endpoint<br/>Sysmon + Universal Forwarder]
